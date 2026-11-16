@@ -840,7 +840,7 @@ async function montarPdf(aoAvancar) {
   const W = 595.28, H = 841.89, MG = 34, CW = W - 2 * MG, COL = CW / 12, GAP = 8, LIMITE = H - 40;
   const TINTA = rgb(0.090, 0.094, 0.082), VERM = rgb(0.878, 0, 0), CINZA = rgb(0.37, 0.36, 0.34), LINHA = rgb(0.60, 0.59, 0.56), FUNDO = rgb(0.965, 0.957, 0.937);
 
-  const nome = capitalizar(val('nome')), funcao = val('funcao'), hoje = new Date().toLocaleDateString('pt-BR');
+  const nome = capitalizar(val('nome')), funcao = val('funcao') === 'Servente' ? 'Servente de Obras' : val('funcao'), hoje = new Date().toLocaleDateString('pt-BR');
   const nomeArq = `Ficha de admissão - ${nome.replace(/[\\/:*?"<>|]/g, '').trim() || 'funcionário'}.pdf`;
 
   // 1. o que vai em cada folha de documento
@@ -903,48 +903,74 @@ async function montarPdf(aoAvancar) {
   const caixa = (pg, x, top, w, h, { borda = LINHA, esp = 0.6, fundo } = {}) => pg.drawRectangle({ x, y: Y(top + h), width: w, height: h, borderColor: borda, borderWidth: esp, color: fundo });
   const traco = (pg, x1, top, x2, cor = VERM, esp = 1) => pg.drawLine({ start: { x: x1, y: Y(top) }, end: { x: x2, y: Y(top) }, thickness: esp, color: cor });
 
-  // ficha: campos em caixas com rótulo, em seções
-  const ROT = 6.4, VAL = 10.2, VLH = 12.4, TIT = 17;
-  const cel = (rotulo, valor, span) => ({ rotulo, valor: limpo(valor), span });
-  const alturaCel = (c, w) => 26.8 + (quebrar(c.valor, fS, VAL, w - 10).length - 1) * VLH;
+  // ficha: campos em caixas com rótulo, em seções. O que a pessoa respondeu no link sai preenchido;
+  // o resto fica em branco (caixa, linha ou "( )") para a empresa preencher à mão.
+  const ROT = 6.4, VAL = 10.2, VLH = 12.4, TIT = 17, OPC = 9.4, OLH = 13;
+  const cel = (rotulo, valor, span, minLinhas = 1) => ({ rotulo, valor: limpo(valor), span, minLinhas });
+  // conteúdo em fluxo: caixinhas de marcar, textos e linhas em branco, que quebram de linha quando não cabem
+  const tx = (t) => ({ t }), cx = (marcada) => ({ cx: !!marcada }), ln = (w) => ({ ln: w });
+  const dataEmBranco = () => [ln(15), tx('/'), ln(15), tx('/'), ln(24)];
+  const opcao = (rotulo, marcada) => [cx(marcada), tx(rotulo)];
+  const fluxo = (rotulo, unidades, span) => ({ rotulo, span, fluxo: unidades });
+  const opcoes = (rotulo, lista, marcada, span) => fluxo(rotulo, lista.map((o) => opcao(o, o === marcada)), span);
+  const periodo = () => [dataEmBranco(), [tx('a')], dataEmBranco(), [tx('('), ln(18), tx(' dias)')]];
+  const largItem = (it) => (it.t != null ? larg(it.t, fS, OPC) : it.cx != null ? 11 : it.ln);
+  const largUnid = (u) => u.reduce((a, it) => a + largItem(it), 0);
+  function arrumar(unids, w) { // [[unidade, x], ...] em cada linha
+    const linhas = [[]]; let x = 0;
+    unids.forEach((u) => { const lu = largUnid(u); if (x > 0 && x + lu > w) { linhas.push([]); x = 0; } linhas[linhas.length - 1].push([u, x]); x += lu + 10; });
+    return linhas;
+  }
+  function marca(pg, x, base, marcada) { // "( )" como caixinha; a resposta do link sai com X
+    caixa(pg, x, base - 7.6, 8, 8, { borda: TINTA, esp: 0.6 });
+    if (marcada) [[1.6, 6, 6.4, 1.2], [1.6, 1.2, 6.4, 6]].forEach(([a, b, c, d]) => pg.drawLine({ start: { x: x + a, y: Y(base - b) }, end: { x: x + c, y: Y(base - d) }, thickness: 1.1, color: TINTA }));
+  }
+  function desenharFluxo(pg, unids, x0, base0, w) {
+    arrumar(unids, w).forEach((linha, i) => {
+      const base = base0 + i * OLH;
+      linha.forEach(([u, dx]) => {
+        let x = x0 + dx;
+        u.forEach((it) => {
+          if (it.t != null) escrever(pg, it.t, x, base, fS, OPC, TINTA);
+          else if (it.cx != null) marca(pg, x, base, it.cx);
+          else pg.drawLine({ start: { x, y: Y(base + 1.5) }, end: { x: x + it.ln, y: Y(base + 1.5) }, thickness: 0.6, color: LINHA });
+          x += largItem(it);
+        });
+      });
+    });
+  }
+  const alturaCel = (c, w) => c.fluxo ? 26.8 + (arrumar(c.fluxo, w - 10).length - 1) * OLH
+    : 26.8 + (Math.max(c.minLinhas, quebrar(c.valor, fS, VAL, w - 10).length) - 1) * VLH;
   function desenharCel(pg, c, x, top, w, h) {
     caixa(pg, x, top, w, h);
     const r = c.rotulo.toUpperCase(); escrever(pg, r, x + 5, top + 9, fR, caber(r, fR, ROT, w - 10, 0.35), CINZA, 0.35);
-    quebrar(c.valor, fS, VAL, w - 10).forEach((l, i) => escrever(pg, l, x + 5, top + 20.8 + i * VLH, fS, VAL, TINTA));
+    if (c.fluxo) desenharFluxo(pg, c.fluxo, x + 5, top + 20.8, w - 10);
+    else quebrar(c.valor, fS, VAL, w - 10).forEach((l, i) => escrever(pg, l, x + 5, top + 20.8 + i * VLH, fS, VAL, TINTA));
   }
-  function tituloSecao(pg, t, top, x = MG, w = CW) {
-    escrever(pg, t.toUpperCase(), x, top + 9, fT, 8.2, VERM, 0.9);
-    traco(pg, x, top + 12.5, x + w, VERM, 0.9);
+  function tituloSecao(pg, t, top, nota) {
+    const T1 = t.toUpperCase(); escrever(pg, T1, MG, top + 9, fT, 8.2, VERM, 0.9);
+    if (nota) escrever(pg, nota, MG + larg(T1, fT, 8.2, 0.9) + 8, top + 9, fS, 8.6, CINZA);
+    traco(pg, MG, top + 12.5, MG + CW, VERM, 0.9);
   }
-  function secao(titulo, linhas) {
+  function secao(titulo, linhas, nota) {
     const hs = linhas.map((cs) => Math.max(...cs.map((c) => alturaCel(c, c.span * COL))));
     return { h: TIT + hs.reduce((a, b) => a + b, 0), desenhar(pg, top) {
-      tituloSecao(pg, titulo, top); let y = top + TIT;
+      tituloSecao(pg, titulo, top, nota); let y = top + TIT;
       linhas.forEach((cs, i) => { let x = MG; cs.forEach((c) => { desenharCel(pg, c, x, y, c.span * COL, hs[i]); x += c.span * COL; }); y += hs[i]; });
-    } };
-  }
-  function ladoALado(a, b) { // duas seções pequenas na mesma linha
-    const meia = (CW - 12) / 2, larguras = (s) => s.cels.map((c) => meia * c.span / s.cels.reduce((t, x) => t + x.span, 0));
-    const hh = Math.max(...[a, b].flatMap((s) => s.cels.map((c, i) => alturaCel(c, larguras(s)[i]))));
-    return { h: TIT + hh, desenhar(pg, top) {
-      [[a, MG], [b, MG + meia + 12]].forEach(([s, x0]) => {
-        tituloSecao(pg, s.titulo, top, x0, meia); let x = x0;
-        s.cels.forEach((c, i) => { const w = larguras(s)[i]; desenharCel(pg, c, x, top + TIT, w, hh); x += w; });
-      });
     } };
   }
   function cabecalhoTabela(pg, cols, x, y, h) {
     cols.forEach(([t, w]) => { caixa(pg, x, y, w, h, { fundo: FUNDO }); const r = t.toUpperCase(); escrever(pg, r, x + 5, y + 10, fR, caber(r, fR, ROT, w - 10, 0.35), CINZA, 0.35); x += w; });
   }
   function tabelaDependentes(ds) {
-    const cols = [['Nome completo', 7 * COL], ['Data de nascimento', 3 * COL], ['Idade', 2 * COL]], CAB = 15, LIN = 17;
+    const cols = [['Nome completo', 5.5 * COL], ['CPF', 2.5 * COL], ['Data de nascimento', 2.5 * COL], ['Idade', 1.5 * COL]], CAB = 15, LIN = 17;
     return { h: TIT + CAB + Math.max(1, ds.length) * LIN, desenhar(pg, top) {
       tituloSecao(pg, 'Dependentes', top); let y = top + TIT;
       cabecalhoTabela(pg, cols, MG, y, CAB); y += CAB;
       if (!ds.length) { caixa(pg, MG, y, CW, LIN); escrever(pg, 'Nenhum dependente informado.', MG + 5, y + 11.8, fS, 9.5, CINZA); return; }
       ds.forEach((d) => {
         let x = MG;
-        [d.nome, d.nasc, d.idade].forEach((v, i) => { const w = cols[i][1]; caixa(pg, x, y, w, LIN); escrever(pg, v, x + 5, y + 12, fS, caber(v, fS, 10, w - 10), TINTA); x += w; });
+        [d.nome, '', d.nasc, d.idade].forEach((v, i) => { const w = cols[i][1]; caixa(pg, x, y, w, LIN); escrever(pg, v, x + 5, y + 12, fS, caber(v, fS, 10, w - 10), TINTA); x += w; });
         y += LIN;
       });
     } };
@@ -967,17 +993,28 @@ async function montarPdf(aoAvancar) {
       });
     });
   } };
-  const assinaturas = { h: 70, desenhar(pg, top) {
-    escrever(pg, 'Declaro que as informações desta ficha são verdadeiras.', MG, top + 12, fS, 9.5, TINTA);
-    const yL = top + 52;
+  // fim da ficha: autodeclaração (Lei nº 14.553/2023), as declarações e um bloco só de assinaturas
+  const RACAS = ['Branca', 'Preta', 'Parda', 'Amarela (de origem asiática)', 'Indígena'].map((r) => opcao(r, false));
+  const TXT_AUTO = 'Conforme exigência legal para o registro no eSocial, assinale com um X a opção que corresponde à sua autodeclaração de raça ou cor, conforme os critérios oficiais do IBGE:';
+  const DECL = ['Declaro que a informação acima reflete a minha própria percepção de identidade étnico-racial.', 'Declaro que as informações desta ficha são verdadeiras.'];
+  const lAuto = quebrar(TXT_AUTO, fS, 9.6, CW), lRacas = arrumar(RACAS, CW).length;
+  const fechamento = { h: TIT + 9 + lAuto.length * 12.4 + 8 + lRacas * OLH + 6 + DECL.length * 15 + 64, desenhar(pg, top) {
+    tituloSecao(pg, 'Autodeclaração (Lei nº 14.553/2023)', top);
+    let y = top + TIT + 9;
+    lAuto.forEach((l) => { escrever(pg, l, MG, y, fS, 9.6, TINTA); y += 12.4; });
+    y += 8; desenharFluxo(pg, RACAS, MG, y, CW); y += lRacas * OLH + 6;
+    DECL.forEach((l) => { escrever(pg, l, MG, y, fS, 9.6, TINTA); y += 15; });
+    const yL = y + 44;
     [['Assinatura do funcionário', 0, 215], ['Assinatura do RH · Dia de Obra', 233, 190], ['Data', 441, CW - 441]].forEach(([t, dx, w]) => {
       traco(pg, MG + dx, yL, MG + dx + w, TINTA, 0.7); escrever(pg, t, MG + dx, yL + 10, fR, 7, CINZA);
     });
     const xd = MG + 441, wd = CW - 441; escrever(pg, '/', xd + wd * 0.3, yL - 3, fS, 12, CINZA); escrever(pg, '/', xd + wd * 0.6, yL - 3, fS, 12, CINZA);
   } };
+  const EMPRESA = 'Dia de Obra Construtora · CNPJ 62.446.909/0001-25';
   const cabecalho = { h: 60, desenhar(pg, top) {
     const lh = 30, lw = lh * logo.width / logo.height;
     pg.drawImage(logo, { x: MG, y: Y(top + 2 + lh), width: lw, height: lh });
+    escrever(pg, EMPRESA, MG, top + 44, fS, 9, CINZA);
     const t = 'Ficha de Admissão'; escrever(pg, t, W - MG - larg(t, fT, 19), top + 16, fT, 19, TINTA);
     const a = 'Função: ', b = funcao.toUpperCase(), wb = larg(b, fT, 10, 0.8), wa = larg(a, fR, 9.5);
     escrever(pg, a, W - MG - wb - wa, top + 31, fR, 9.5, CINZA); escrever(pg, b, W - MG - wb, top + 31, fT, 10, VERM, 0.8);
@@ -991,29 +1028,44 @@ async function montarPdf(aoAvancar) {
   } };
 
   const ctps = val('ctps') === 'Sim' ? 'Sim, no celular' : val('ctps') === 'Não' ? 'Não tem' : '';
+  const civil = /divorc|separad/i.test(val('civil')) ? 'Divorciado(a) ou separado(a)' : val('civil');
   const blocos = [
     cabecalho,
+    secao('Dados da contratação', [
+      [cel('CNO nº', '', 4), cel('Obra vinculada', '', 8)],
+      [fluxo('Departamento', [opcao('Obras'), opcao('Escritório'), [...opcao('Outro:'), tx(' '), ln(80)]], 7), cel('Função', funcao, 5)],
+      [fluxo('Data de admissão', [dataEmBranco()], 3), cel('Salário (R$)', '', 4), opcoes('Pagamento', ['Hora', 'Dia', 'Mês'], null, 5)],
+      [opcoes('Tipo de contrato', ['Prazo de experiência', 'Prazo determinado', 'Prazo indeterminado'], null, 12)],
+      [fluxo('Prazo de experiência', periodo(), 6), fluxo('Prorrogação (se houver)', periodo(), 6)],
+      [fluxo('Se prazo determinado', [[tx('início '), ...dataEmBranco()], [tx('término '), ...dataEmBranco()]], 6), cel('Dias de trabalho', '', 6)],
+      [cel('Horário', '', 6, 2), cel('Intervalo intrajornada', '', 6, 2)],
+      [opcoes('Vale-transporte', ['Sim', 'Não'], val('vt'), 3), cel('Nº do cartão (VT)', '', 3), cel('Camisa', val('camisa'), 2), cel('Calça', '', 2), cel('Bota (nº do calçado)', val('bota'), 2)],
+    ], 'preenchido pela empresa'),
     secao('Dados pessoais', [
       [cel('Nome completo', nome, 8), cel('Data de nascimento', val('nasc'), 4)],
-      [cel('CPF', val('cpf'), 4), cel('RG', val('rg'), 4), cel('Órgão emissor / UF', `${val('rgorg').toUpperCase()}/${val('rguf')}`, 4)],
-      [cel('Nome da mãe', capitalizar(val('mae')), 8), cel('Estado civil', val('civil'), 4)],
-      [cel('Escolaridade', val('escola'), 6), cel('WhatsApp', val('zap'), 6)],
-    ]),
-    secao('Endereço', [
-      [cel('Rua e número', val('rua'), 8), cel('CEP', val('cep'), 4)],
-      [cel('Bairro', val('bairro'), 5), cel('Cidade', val('cidade'), 5), cel('UF', val('uf'), 2)],
+      [cel('Local de nascimento (cidade)', '', 6), cel('UF', '', 2), cel('Escolaridade', val('escola'), 4)],
+      [cel('CPF', val('cpf'), 3), cel('RG', val('rg'), 3), cel('Órgão emissor / UF', `${val('rgorg').toUpperCase()}/${val('rguf')}`, 3), fluxo('Data de expedição do RG', [dataEmBranco()], 3)],
+      [cel('Filiação · nome do pai', '', 6), cel('Filiação · nome da mãe', capitalizar(val('mae')), 6)],
+      [opcoes('Estado civil', ['Solteiro(a)', 'Casado(a)', 'Divorciado(a) ou separado(a)', 'Viúvo(a)', 'União estável'], civil, 12)],
+      [cel('Nome do cônjuge', '', 5), cel('Telefone / WhatsApp', val('zap'), 3), cel('E-mail', '', 4)],
     ]),
     secao('Documentos de trabalho', [
-      [cel('Carteira de trabalho digital', ctps, 3), cel('PIS/NIS', val('pis'), 3), cel('Título de eleitor', val('titulo'), 3), cel('Reservista', val('reservista'), 3)],
+      [cel('Carteira de trabalho nº', '', 4), cel('Série', '', 2), cel('UF', '', 2), cel('Carteira de trabalho digital', ctps, 4)],
+      [cel('PIS/NIS', val('pis'), 4), cel('Título de eleitor nº', val('titulo'), 4), cel('Zona', '', 2), cel('Seção', '', 2)],
+      [cel('Certificado de reservista ou de dispensa (RA)', val('reservista'), 8), fluxo('Data de expedição', [dataEmBranco()], 4)],
     ]),
-    secao('Pagamento', [[cel('Chave PIX', val('pix'), 6), cel('Banco, agência e conta', val('banco'), 6)]]),
-    ladoALado(
-      { titulo: 'Uniforme e EPI', cels: [cel('Tamanho da camisa', val('camisa'), 1), cel('Número da bota', val('bota'), 1)] },
-      { titulo: 'Vale-transporte', cels: [cel('Vai usar vale-transporte?', val('vt'), 1)] },
-    ),
+    secao('Endereço', [
+      [cel('Rua e número', val('rua'), 8), cel('Complemento', '', 4)],
+      [cel('Bairro', val('bairro'), 4), cel('Cidade', val('cidade'), 4), cel('UF', val('uf'), 1), cel('CEP', val('cep'), 3)],
+      [cel('Obs.', '', 12)],
+    ]),
+    secao('Dados bancários', [
+      [cel('Conta bancária · banco / agência / conta', val('banco'), 12)],
+      [cel('Conta para PIX · banco', '', 5), cel('Chave PIX', val('pix'), 7)],
+    ]),
     tabelaDependentes(dependentes()),
     tabelaAnexos,
-    assinaturas,
+    fechamento,
   ];
 
   // 4. pagina a ficha antes de desenhar, para numerar as folhas dos documentos
@@ -1037,7 +1089,7 @@ async function montarPdf(aoAvancar) {
     const pg = pdf.addPage([W, H]);
     if (i > 0) continuacao.desenhar(pg, MG);
     blocosDaFolha.forEach(([b, top]) => b.desenhar(pg, top));
-    escrever(pg, `Dia de Obra Construtora · Ficha de admissão de ${nome}`, MG, H - 20, fS, 7.5, CINZA);
+    escrever(pg, `${EMPRESA} · Ficha de admissão de ${nome}`, MG, H - 20, fS, 7.5, CINZA);
     const p = `pág. ${i + 1} de ${total}`; escrever(pg, p, W - MG - larg(p, fR, 7.5), H - 20, fR, 7.5, CINZA);
   });
 
